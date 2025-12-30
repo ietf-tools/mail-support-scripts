@@ -1,0 +1,221 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "psycopg[binary]"]
+# ///
+"""
+Sync datatracker aliases to postfix virtual table.
+
+Usage:
+    ./sync.py                                  # no-op, just loads aliases
+    ./sync.py --diff                           # show what would change
+    ./sync.py --apply                          # apply changes to DB
+    ./sync.py --diff --apply                   # show diff to stderr, then apply
+
+    ./sync.py --drafts-file drafts.json --groups-file groups.json --diff   # use local files instead of api
+"""
+
+import argparse
+import json
+import os
+import sys
+
+import httpx
+import psycopg
+
+DATATRACKER_URL = os.environ.get("DATATRACKER_URL", "https://datatracker.ietf.org")
+DATATRACKER_TOKEN = os.environ.get("DATATRACKER_TOKEN")
+
+# This needs changing for production, e.g. to "ietf.org"
+TEST_MAIL_HOST = os.environ.get("MAIL_HOST", "lists.sys.slush.ca")
+DOMAIN_MAP = {"ietf": TEST_MAIL_HOST, "iab": TEST_MAIL_HOST, "irtf": TEST_MAIL_HOST}
+
+# Remove this and its use below for production
+TEST_OVERRIDE_ADDRESSES = ['sam@newmachinefutures.nz', 'dane@newmachinefutures.nz']
+
+DB_HOST = os.environ.get("DB_HOST", "db-rw")
+DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_NAME = os.environ.get("DB_NAME", "postfix")
+DB_USER = os.environ.get("DB_USER", "postfix")
+DB_PASS = os.environ.get("DB_PASS", "")
+
+def log(msg: str) -> None:
+    print(f"-- {msg}", file=sys.stderr)
+
+
+def get_db_connection():
+    conninfo = f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_USER} password={DB_PASS}"
+    return psycopg.connect(conninfo)
+
+
+def fetch_from_api(endpoint: str, alias_type: str) -> list[dict]:
+    url = f"{DATATRACKER_URL}{endpoint}"
+    headers = {"X-Api-Key": DATATRACKER_TOKEN} if DATATRACKER_TOKEN else {}
+    
+    if not DATATRACKER_TOKEN:
+        log("warning: DATATRACKER_TOKEN not set")
+    
+    resp = httpx.get(url, headers=headers, timeout=120)
+    resp.raise_for_status()
+    return parse_aliases(resp.json(), alias_type)
+
+
+def load_from_file(path: str, alias_type: str) -> list[dict]:
+    with open(path) as f:
+        return parse_aliases(json.load(f), alias_type)
+
+
+def parse_aliases(data: dict, alias_type: str) -> list[dict]:
+    result = []
+    for entry in data.get("aliases", []):
+        alias_name = entry.get("alias")
+        addresses = entry.get("addresses", [])
+        
+        if TEST_OVERRIDE_ADDRESSES:
+            addresses = TEST_OVERRIDE_ADDRESSES
+
+        if not alias_name or not addresses:
+            continue
+        
+        for domain in entry.get("domains", []):
+            if mail_host := DOMAIN_MAP.get(domain):
+                result.append({
+                    "email": f"{alias_name}@{mail_host}",
+                    "destination": ", ".join(addresses),
+                    "alias_type": alias_type,
+                })
+    return result
+
+
+def fetch_existing(conn) -> dict[str, str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT email, destination FROM virtual WHERE source = 'datatracker'")
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def aliases_to_dict(aliases: list[dict]) -> dict[str, str]:
+    return {a["email"]: a["destination"] for a in aliases}
+
+
+def compute_diff(existing: dict[str, str], new: dict[str, str]) -> tuple[set, set, set]:
+    added = set(new.keys()) - set(existing.keys())
+    removed = set(existing.keys()) - set(new.keys())
+    changed = {k for k in existing.keys() & new.keys() if existing[k] != new[k]}
+    return added, removed, changed
+
+
+def print_diff(existing: dict[str, str], new: dict[str, str], file=sys.stdout) -> None:
+    added, removed, changed = compute_diff(existing, new)
+    
+    print("=== Diff Report ===", file=file)
+    print(f"Existing: {len(existing)}, New: {len(new)}", file=file)
+    print(f"Added: {len(added)}, Removed: {len(removed)}, Changed: {len(changed)}", file=file)
+    print(file=file)
+    
+    if added:
+        print("--- ADDED ---", file=file)
+        for email in sorted(added):
+            dest = new[email]
+            print(f"  + {email}", file=file)
+            print(f"    → {dest[:80]}..." if len(dest) > 80 else f"    → {dest}", file=file)
+        print(file=file)
+    
+    if removed:
+        print("--- REMOVED ---", file=file)
+        for email in sorted(removed):
+            print(f"  - {email}", file=file)
+        print(file=file)
+    
+    if changed:
+        print("--- CHANGED ---", file=file)
+        for email in sorted(changed):
+            old_val, new_val = existing[email], new[email]
+            print(f"  ~ {email}", file=file)
+            print(f"    old: {old_val[:60]}..." if len(old_val) > 60 else f"    old: {old_val}", file=file)
+            print(f"    new: {new_val[:60]}..." if len(new_val) > 60 else f"    new: {new_val}", file=file)
+        print(file=file)
+
+
+def apply_changes(conn, existing: dict[str, str], new: dict[str, str], force: bool = False) -> None:
+    added, removed, changed = compute_diff(existing, new)
+    
+    if not force and existing and len(removed) > len(existing) * 0.5:
+        raise RuntimeError(
+            f"Safety check failed: removing {len(removed)} of {len(existing)} aliases (>50%). "
+            "This may indicate bad API data. Use --force to override."
+        )
+    
+    with conn.transaction():
+        with conn.cursor() as cur:
+            for email in removed:
+                cur.execute("DELETE FROM virtual WHERE email = %s AND source = 'datatracker'", (email,))
+            
+            for email in added:
+                cur.execute(
+                    "INSERT INTO virtual (email, destination, source) VALUES (%s, %s, 'datatracker')",
+                    (email, new[email])
+                )
+            
+            for email in changed:
+                cur.execute(
+                    "UPDATE virtual SET destination = %s WHERE email = %s AND source = 'datatracker'",
+                    (new[email], email)
+                )
+    
+    log(f"applied: {len(added)} added, {len(removed)} removed, {len(changed)} changed")
+
+
+def load_aliases(args) -> list[dict]:
+    aliases = []
+    
+    if args.drafts_file:
+        log(f"loading drafts from {args.drafts_file}")
+        aliases.extend(load_from_file(args.drafts_file, "draft"))
+    else:
+        log("fetching draft aliases from API...")
+        aliases.extend(fetch_from_api("/api/doc/draft-aliases/", "draft"))
+    
+    if args.groups_file:
+        log(f"loading groups from {args.groups_file}")
+        aliases.extend(load_from_file(args.groups_file, "group"))
+    else:
+        log("fetching group aliases from API...")
+        aliases.extend(fetch_from_api("/api/group/group-aliases/", "group"))
+    
+    log(f"loaded {len(aliases)} aliases")
+    return aliases
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sync datatracker aliases to postfix virtual table",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    parser.add_argument("--drafts-file", help="Load draft aliases from JSON file")
+    parser.add_argument("--groups-file", help="Load group aliases from JSON file")
+    parser.add_argument("--diff", action="store_true", help="Show diff report")
+    parser.add_argument("--apply", action="store_true", help="Apply changes to database")
+    parser.add_argument("--force", action="store_true", help="Override safety checks")
+    args = parser.parse_args()
+    
+    if not args.diff and not args.apply:
+        parser.print_help()
+        return
+    
+    aliases = load_aliases(args)
+    new = aliases_to_dict(aliases)
+    
+    with get_db_connection() as conn:
+        existing = fetch_existing(conn)
+        
+        if args.diff:
+            output = sys.stderr if args.apply else sys.stdout
+            print_diff(existing, new, file=output)
+        
+        if args.apply:
+            apply_changes(conn, existing, new, force=args.force)
+
+
+if __name__ == "__main__":
+    main()
