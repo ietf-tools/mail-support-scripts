@@ -1,0 +1,123 @@
+{{- if .Values.globalAllowlistSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mail-support-scripts.fullname" . }}-global-allowlist
+  labels:
+    {{- include "mail-support-scripts.labels" . | nindent 4 }}
+    app.kubernetes.io/component: global-allowlist-sync
+spec:
+  schedule: {{ .Values.globalAllowlistSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "mail-support-scripts.labels" . | nindent 12 }}
+            app.kubernetes.io/component: global-allowlist-sync
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          serviceAccountName: {{ include "mail-support-scripts.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: global-allowlist-sync
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - uv
+                - run
+                - {{ .Values.scriptsBaseUrl }}/global-allowlist-sync
+              args:
+                {{- toYaml .Values.globalAllowlistSync.args | nindent 16 }}
+              env:
+                {{- range $key, $value := .Values.globalAllowlistSync.env }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- with .Values.globalAllowlistSync.secrets.datatrackerToken }}
+                {{- if .existingSecretName }}
+                - name: DATATRACKER_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .existingSecretKey }}
+                {{- end }}
+                {{- end }}
+                {{- with .Values.globalAllowlistSync.secrets.mailman }}
+                {{- if .existingSecretName }}
+                - name: MAILMAN_API_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .urlKey }}
+                - name: MAILMAN_API_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .userKey }}
+                - name: MAILMAN_API_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .passwordKey }}
+                {{- end }}
+                {{- end }}
+                {{- with .Values.globalAllowlistSync.secrets.postconfirmDb }}
+                {{- if .existingSecretName }}
+                - name: POSTCONFIRM_DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .hostKey }}
+                - name: POSTCONFIRM_DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .portKey }}
+                - name: POSTCONFIRM_DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .nameKey }}
+                - name: POSTCONFIRM_DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .userKey }}
+                - name: POSTCONFIRM_DB_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .passwordKey }}
+                {{- end }}
+                {{- end }}
+              {{- with .Values.globalAllowlistSync.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}

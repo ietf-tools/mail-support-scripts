@@ -1,0 +1,65 @@
+image:
+  repository: ghcr.io/astral-sh/uv
+  tag: python3.12-alpine
+  pullPolicy: IfNotPresent
+
+scriptsBaseUrl: https://raw.githubusercontent.com/ietf-tools/mail-support-scripts/main/scripts
+
+dtAliasSync:
+  enabled: true
+  schedule: "*/15 * * * *"
+  args: ["--apply"]
+  env:
+    DATATRACKER_URL: https://datatracker.ietf.org
+    MAIL_HOST: lists.ietf.org
+  envFrom: []
+  secrets:
+    datatrackerToken:
+      existingSecretName: ""
+      existingSecretKey: token
+    db:
+      existingSecretName: ""
+      hostKey: host
+      portKey: port
+      nameKey: dbname
+      userKey: username
+      passwordKey: password
+
+globalAllowlistSync:
+  enabled: true
+  schedule: "0 * * * *"
+  args: ["--apply"]
+  env:
+    DATATRACKER_URL: https://datatracker.ietf.org
+    GLOBAL_ALLOWLIST_FQDN: global-whitelist@ietf.org
+  envFrom: []
+  secrets:
+    datatrackerToken:
+      existingSecretName: ""
+      existingSecretKey: token
+    mailman:
+      existingSecretName: ""
+      urlKey: url
+      userKey: user
+      passwordKey: password
+    postconfirmDb:
+      existingSecretName: ""
+      hostKey: host
+      portKey: port
+      nameKey: dbname
+      userKey: username
+      passwordKey: password
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

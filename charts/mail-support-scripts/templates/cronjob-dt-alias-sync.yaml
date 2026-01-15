@@ -1,0 +1,104 @@
+{{- if .Values.dtAliasSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mail-support-scripts.fullname" . }}-dt-alias-sync
+  labels:
+    {{- include "mail-support-scripts.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dt-alias-sync
+spec:
+  schedule: {{ .Values.dtAliasSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "mail-support-scripts.labels" . | nindent 12 }}
+            app.kubernetes.io/component: dt-alias-sync
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          serviceAccountName: {{ include "mail-support-scripts.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: dt-alias-sync
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - uv
+                - run
+                - {{ .Values.scriptsBaseUrl }}/dt-alias-sync
+              args:
+                {{- toYaml .Values.dtAliasSync.args | nindent 16 }}
+              env:
+                {{- range $key, $value := .Values.dtAliasSync.env }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- with .Values.dtAliasSync.secrets.datatrackerToken }}
+                {{- if .existingSecretName }}
+                - name: DATATRACKER_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .existingSecretKey }}
+                {{- end }}
+                {{- end }}
+                {{- with .Values.dtAliasSync.secrets.db }}
+                {{- if .existingSecretName }}
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .hostKey }}
+                - name: DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .portKey }}
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .nameKey }}
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .userKey }}
+                - name: DB_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .existingSecretName }}
+                      key: {{ .passwordKey }}
+                {{- end }}
+                {{- end }}
+              {{- with .Values.dtAliasSync.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}
