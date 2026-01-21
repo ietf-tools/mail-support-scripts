@@ -10,7 +10,7 @@ This script maintains the single source of truth for "known good senders":
 1. Fetches active emails from Datatracker API
 2. Fetches all Mailman subscribers + accept_these_nonmembers
 3. Syncs combined list to global-whitelist@ietf.org Mailman list
-4. Syncs to postconfirm's senders_static table
+4. Syncs to postconfirm's senders table
 
 Usage:
     ./global-allowlist-sync                    # dry-run, show what would change
@@ -222,20 +222,20 @@ def fetch_never_allow_addresses() -> set[str]:
         }
 
 
-def sync_postconfirm_senders_static(addresses: set[str], apply: bool) -> tuple[int, int, int]:
-    logger.info("syncing to postconfirm senders_static...")
+def sync_postconfirm_senders(addresses: set[str], apply: bool) -> tuple[int, int, int]:
+    logger.info("syncing to postconfirm senders...")
 
     with get_postconfirm_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT sender FROM senders_static WHERE source = 'global-allowlist' AND type = 'E'"
+                "SELECT sender FROM senders WHERE source = 'global-allowlist' AND type = 'E'"
             )
             existing = {row[0] for row in cur.fetchall()}
 
         to_add = addresses - existing
         to_remove = existing - addresses
 
-        logger.info("postconfirm senders_static: %d to add, %d to remove", len(to_add), len(to_remove))
+        logger.info("postconfirm senders: %d to add, %d to remove", len(to_add), len(to_remove))
 
         if not apply:
             return len(to_add), len(to_remove), len(existing)
@@ -244,14 +244,14 @@ def sync_postconfirm_senders_static(addresses: set[str], apply: bool) -> tuple[i
             with conn.cursor() as cur:
                 for addr in to_remove:
                     cur.execute(
-                        "DELETE FROM senders_static WHERE sender = %s AND source = 'global-allowlist'",
+                        "DELETE FROM senders WHERE sender = %s AND source = 'global-allowlist'",
                         (addr,)
                     )
 
                 for addr in to_add:
                     cur.execute(
                         """
-                        INSERT INTO senders_static (sender, action, source, type)
+                        INSERT INTO senders (sender, action, source, type)
                         VALUES (%s, 'accept', 'global-allowlist', 'E')
                         ON CONFLICT (sender) DO UPDATE SET action = 'accept', source = 'global-allowlist'
                         """,
@@ -302,7 +302,7 @@ def main():
         mm.sync_global_allowlist(addresses, apply=args.apply)
 
     if not args.skip_postconfirm:
-        sync_postconfirm_senders_static(addresses, apply=args.apply)
+        sync_postconfirm_senders(addresses, apply=args.apply)
 
     if args.apply:
         logger.info("sync complete")
