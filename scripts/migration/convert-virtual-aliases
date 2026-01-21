@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+Convert Postfix virtual alias file to SQL INSERT statements.
+
+Splits into:
+- virtual_alias table (entries with @ in the key)
+- relay_domains table (bare domain entries without @)
+"""
+
+import sys
+
+
+def parse_virtual_file(lines):
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            entries.append((parts[0], parts[1]))
+        elif len(parts) == 1:
+            entries.append((parts[0], ''))
+
+    return entries
+
+
+def main():
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], 'r') as f:
+            lines = f.readlines()
+    else:
+        lines = sys.stdin.readlines()
+
+    entries = parse_virtual_file(lines)
+
+    aliases = []
+    domains = []
+    catchalls = []
+
+    for key, value in entries:
+        if key.startswith('@'):
+            catchalls.append((key, value))
+        elif '@' in key:
+            aliases.append((key, value))
+        else:
+            domains.append(key)
+
+    print("BEGIN;")
+    print()
+
+    print("-- Relay domains")
+    print()
+    for domain in domains:
+        print(f"INSERT INTO relay_domains (domain) VALUES ('{domain}')")
+        print("ON CONFLICT (domain) DO NOTHING;")
+        print()
+
+    print("-- Virtual aliases")
+    print()
+    for email, destination in aliases:
+        print("INSERT INTO virtual_alias (email, destination, source)")
+        print(f"VALUES ('{email}', '{destination}', 'static');")
+        print()
+
+    print("COMMIT;")
+
+    if catchalls:
+        print()
+        print("-- WARNING: The following catch-all entries were skipped.")
+        for email, destination in catchalls:
+            print(f"--   {email} -> {destination}")
+
+
+if __name__ == '__main__':
+    main()
