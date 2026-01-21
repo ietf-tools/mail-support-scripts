@@ -8,11 +8,17 @@ Deploy using the Helm chart:
 
 ```bash
 helm install mail-support-scripts ./charts/mail-support-scripts \
+  -n mail \
   --set dtAliasSync.enabled=true \
-  --set globalAllowlistSync.enabled=true
+  --set dtAliasSync.secrets.datatrackerToken.existingSecretName=datatracker \
+  --set dtAliasSync.secrets.db.existingSecretName=db-postfix \
+  --set globalAllowlistSync.enabled=true \
+  --set globalAllowlistSync.secrets.datatrackerToken.existingSecretName=datatracker \
+  --set globalAllowlistSync.secrets.mailman.existingSecretName=mailman-api \
+  --set globalAllowlistSync.secrets.postconfirmDb.existingSecretName=db-postconfirm
 ```
 
-Scripts are fetched directly from GitHub at runtime using `uv run`, so no container build is required.
+Scripts are fetched directly from GitHub at runtime using `uv run`, so no container rebuild is required when scripts are updated.
 
 See `charts/mail-support-scripts/values.yaml` for all configuration options.
 
