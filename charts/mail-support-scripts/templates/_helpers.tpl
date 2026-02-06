@@ -58,3 +58,49 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Init container that clones the scripts repo via SSH deploy key.
+*/}}
+{{- define "mail-support-scripts.fetchScriptsInitContainer" -}}
+- name: fetch-scripts
+  image: "{{ .Values.gitImage.repository }}:{{ .Values.gitImage.tag }}"
+  imagePullPolicy: {{ .Values.gitImage.pullPolicy }}
+  command:
+    - sh
+    - -c
+    - |
+      mkdir -p ~/.ssh
+      cp /etc/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
+      chmod 600 ~/.ssh/id_ed25519
+      ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+      git clone --depth 1 --branch {{ .Values.scriptsRef }} {{ .Values.scriptsRepo }} /repo
+  volumeMounts:
+    - name: deploy-key
+      mountPath: /etc/deploy-key
+      readOnly: true
+    - name: repo
+      mountPath: /repo
+{{- end }}
+
+{{/*
+Volumes for deploy key and cloned repo.
+*/}}
+{{- define "mail-support-scripts.scriptVolumes" -}}
+- name: deploy-key
+  secret:
+    secretName: {{ .Values.deployKey.secretName }}
+    defaultMode: 0400
+- name: repo
+  emptyDir: {}
+{{- end }}
+
+{{/*
+Volume mount for the scripts directory in the main container.
+*/}}
+{{- define "mail-support-scripts.scriptVolumeMount" -}}
+- name: repo
+  mountPath: /scripts
+  subPath: scripts
+  readOnly: true
+{{- end }}

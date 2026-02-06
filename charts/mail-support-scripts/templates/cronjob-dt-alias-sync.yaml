@@ -40,6 +40,8 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          initContainers:
+            {{- include "mail-support-scripts.fetchScriptsInitContainer" . | nindent 12 }}
           containers:
             - name: dt-alias-sync
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -47,51 +49,25 @@ spec:
               command:
                 - uv
                 - run
-                - {{ .Values.scriptsBaseUrl }}/dt-alias-sync
-              args:
-                {{- toYaml .Values.dtAliasSync.args | nindent 16 }}
+                - /scripts/dt-alias-sync
+                {{- range .Values.dtAliasSync.args }}
+                - {{ . | quote }}
+                {{- end }}
               env:
-                {{- range $key, $value := .Values.dtAliasSync.env }}
-                - name: {{ $key }}
-                  value: {{ $value | quote }}
+                {{- range $k, $v := .Values.commonEnv }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
                 {{- end }}
-                {{- with .Values.dtAliasSync.secrets.datatrackerToken }}
-                {{- if .existingSecretName }}
-                - name: DATATRACKER_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .existingSecretKey }}
+                {{- range $k, $v := .Values.dtAliasSync.env }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
                 {{- end }}
-                {{- end }}
-                {{- with .Values.dtAliasSync.secrets.db }}
-                {{- if .existingSecretName }}
-                - name: DB_HOST
+                {{- range .Values.dtAliasSync.secrets }}
+                - name: {{ .name }}
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .hostKey }}
-                - name: DB_PORT
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .portKey }}
-                - name: DB_NAME
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .nameKey }}
-                - name: DB_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .userKey }}
-                - name: DB_PASS
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .passwordKey }}
-                {{- end }}
+                      name: {{ .secretName }}
+                      key: {{ .key }}
                 {{- end }}
               {{- with .Values.dtAliasSync.envFrom }}
               envFrom:
@@ -101,4 +77,8 @@ spec:
               resources:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
+              volumeMounts:
+                {{- include "mail-support-scripts.scriptVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "mail-support-scripts.scriptVolumes" . | nindent 12 }}
 {{- end }}

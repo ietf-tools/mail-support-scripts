@@ -40,6 +40,8 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          initContainers:
+            {{- include "mail-support-scripts.fetchScriptsInitContainer" . | nindent 12 }}
           containers:
             - name: global-allowlist-sync
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -47,70 +49,25 @@ spec:
               command:
                 - uv
                 - run
-                - {{ .Values.scriptsBaseUrl }}/global-allowlist-sync
-              args:
-                {{- toYaml .Values.globalAllowlistSync.args | nindent 16 }}
+                - /scripts/global-allowlist-sync
+                {{- range .Values.globalAllowlistSync.args }}
+                - {{ . | quote }}
+                {{- end }}
               env:
-                {{- range $key, $value := .Values.globalAllowlistSync.env }}
-                - name: {{ $key }}
-                  value: {{ $value | quote }}
+                {{- range $k, $v := .Values.commonEnv }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
                 {{- end }}
-                {{- with .Values.globalAllowlistSync.secrets.datatrackerToken }}
-                {{- if .existingSecretName }}
-                - name: DATATRACKER_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .existingSecretKey }}
+                {{- range $k, $v := .Values.globalAllowlistSync.env }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
                 {{- end }}
-                {{- end }}
-                {{- with .Values.globalAllowlistSync.secrets.mailman }}
-                {{- if .existingSecretName }}
-                - name: MAILMAN_API_URL
+                {{- range .Values.globalAllowlistSync.secrets }}
+                - name: {{ .name }}
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .urlKey }}
-                - name: MAILMAN_API_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .userKey }}
-                - name: MAILMAN_API_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .passwordKey }}
-                {{- end }}
-                {{- end }}
-                {{- with .Values.globalAllowlistSync.secrets.postconfirmDb }}
-                {{- if .existingSecretName }}
-                - name: POSTCONFIRM_DB_HOST
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .hostKey }}
-                - name: POSTCONFIRM_DB_PORT
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .portKey }}
-                - name: POSTCONFIRM_DB_NAME
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .nameKey }}
-                - name: POSTCONFIRM_DB_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .userKey }}
-                - name: POSTCONFIRM_DB_PASS
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .existingSecretName }}
-                      key: {{ .passwordKey }}
-                {{- end }}
+                      name: {{ .secretName }}
+                      key: {{ .key }}
                 {{- end }}
               {{- with .Values.globalAllowlistSync.envFrom }}
               envFrom:
@@ -120,4 +77,8 @@ spec:
               resources:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
+              volumeMounts:
+                {{- include "mail-support-scripts.scriptVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "mail-support-scripts.scriptVolumes" . | nindent 12 }}
 {{- end }}

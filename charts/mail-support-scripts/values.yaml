@@ -3,52 +3,34 @@ image:
   tag: python3.12-alpine
   pullPolicy: IfNotPresent
 
-scriptsBaseUrl: https://raw.githubusercontent.com/ietf-tools/mail-support-scripts/main/scripts
+gitImage:
+  repository: alpine/git
+  tag: latest
+  pullPolicy: IfNotPresent
+
+scriptsRepo: git@github.com:ietf-tools/mail-support-scripts.git
+scriptsRef: main
+
+deployKey:
+  secretName: mail-support-scripts-deploy-key
+
+commonEnv: {}
 
 dtAliasSync:
   enabled: true
   schedule: "*/15 * * * *"
   args: ["--apply"]
-  env:
-    DATATRACKER_URL: https://datatracker.ietf.org
-    MAIL_HOST: lists.ietf.org
+  env: {}
+  secrets: []
   envFrom: []
-  secrets:
-    datatrackerToken:
-      existingSecretName: ""
-      existingSecretKey: token
-    db:
-      existingSecretName: ""
-      hostKey: host
-      portKey: port
-      nameKey: dbname
-      userKey: username
-      passwordKey: password
 
 globalAllowlistSync:
   enabled: true
   schedule: "0 * * * *"
   args: ["--apply"]
-  env:
-    DATATRACKER_URL: https://datatracker.ietf.org
-    GLOBAL_ALLOWLIST_FQDN: global-whitelist@ietf.org
+  env: {}
+  secrets: []
   envFrom: []
-  secrets:
-    datatrackerToken:
-      existingSecretName: ""
-      existingSecretKey: token
-    mailman:
-      existingSecretName: ""
-      urlKey: url
-      userKey: user
-      passwordKey: password
-    postconfirmDb:
-      existingSecretName: ""
-      hostKey: host
-      portKey: port
-      nameKey: dbname
-      userKey: username
-      passwordKey: password
 
 serviceAccount:
   create: true
