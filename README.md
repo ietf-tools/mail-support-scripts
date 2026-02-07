@@ -10,24 +10,27 @@ script with `uv run` against the local checkout.
 ## Prerequisites
 
 - A read-only [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) for this repo
-- A Kubernetes secret containing the deploy key private key (`mail-support-scripts-deploy-key`)
 
 ## Helm Chart
 
 ```bash
-helm install mail-support-scripts ./charts/mail-support-scripts -n mail -f values.yaml
+helm repo add mail-support-scripts https://ietf-tools.github.io/mail-support-scripts
+helm install mail-support-scripts mail-support-scripts/mail-support-scripts -n mail -f values.yaml
 ```
 
 Example `values.yaml`:
 
 ```yaml
+deployKey:
+  secretName: mail-secrets-env
+  secretKey: MAIL_SUPPORT_SCRIPTS_DEPLOY_KEY
+
 commonEnv:
   DATATRACKER_URL: https://datatracker.staging.ietf.org
+  ## During testing this replaces the destination address for all aliases built by dt-alias-sync
+  TEST_OVERRIDE_ADDRESSES: noreply@ietf.org
 
 dtAliasSync:
-  enabled: true
-  schedule: "*/15 * * * *"
-  args: ["--apply"]
   env:
     MAIL_HOST: uat.tools-dev.org
     DB_HOST: db-email-staging-rw
@@ -35,29 +38,26 @@ dtAliasSync:
     DB_NAME: postfix
   secrets:
     - name: DATATRACKER_TOKEN
-      secretName: datatracker-api
-      key: token
+      secretName: mail-secrets-env
+      key: DATATRACKER_API_TOKEN
     - name: DB_USER
-      secretName: db-email-postfix-user
-      key: username
+      secretName: mail-secrets-env
+      key: POSTFIX_DB_USER
     - name: DB_PASS
-      secretName: db-email-postfix-user
-      key: password
+      secretName: mail-secrets-env
+      key: POSTFIX_DB_PASS
 
 globalAllowlistSync:
-  enabled: true
-  schedule: "0 * * * *"
-  args: ["--apply"]
   env:
-    GLOBAL_ALLOWLIST_FQDN: global-whitelist@uat.tools-dev.org
+    GLOBAL_ALLOWLIST_FQDN: global-allowlist@uat.tools-dev.org
     MAILMAN_API_URL: http://mailman:8001/3.1
     POSTCONFIRM_DB_HOST: db-email-staging-rw
     POSTCONFIRM_DB_PORT: "5432"
     POSTCONFIRM_DB_NAME: postconfirm
   secrets:
     - name: DATATRACKER_TOKEN
-      secretName: datatracker-api
-      key: token
+      secretName: mail-secrets-env
+      key: DATATRACKER_API_TOKEN
     - name: MAILMAN_API_USER
       secretName: mail-secrets-env
       key: mailmanApiUser
@@ -65,11 +65,11 @@ globalAllowlistSync:
       secretName: mail-secrets-env
       key: mailmanApiPass
     - name: POSTCONFIRM_DB_USER
-      secretName: db-email-postconfirm-user
-      key: username
+      secretName: mail-secrets-env
+      key: POSTCONFIRM_DB_USER
     - name: POSTCONFIRM_DB_PASS
-      secretName: db-email-postconfirm-user
-      key: password
+      secretName: mail-secrets-env
+      key: POSTCONFIRM_DB_PASS
 ```
 
 ## Scripts
