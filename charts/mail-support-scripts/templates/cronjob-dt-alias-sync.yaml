@@ -49,6 +49,7 @@ spec:
               command:
                 - uv
                 - run
+                - --script
                 - /scripts/dt-alias-sync
                 {{- range .Values.dtAliasSync.args }}
                 - {{ . | quote }}

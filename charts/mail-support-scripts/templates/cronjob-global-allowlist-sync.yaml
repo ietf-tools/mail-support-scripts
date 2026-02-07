@@ -49,6 +49,7 @@ spec:
               command:
                 - uv
                 - run
+                - --script
                 - /scripts/global-allowlist-sync
                 {{- range .Values.globalAllowlistSync.args }}
                 - {{ . | quote }}
