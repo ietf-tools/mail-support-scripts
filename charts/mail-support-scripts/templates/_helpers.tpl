@@ -70,11 +70,7 @@ Init container that clones the scripts repo via SSH deploy key.
     - sh
     - -c
     - |
-      mkdir -p ~/.ssh
-      cp /etc/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
-      chmod 600 ~/.ssh/id_ed25519
-      ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-      git clone --depth 1 --branch {{ .Values.scriptsRef }} {{ .Values.scriptsRepo }} /repo
+      GIT_SSH_COMMAND="ssh -i /etc/deploy-key/ssh-privatekey -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" git clone --depth 1 --branch {{ .Values.scriptsRef }} {{ .Values.scriptsRepo }} /repo
   volumeMounts:
     - name: deploy-key
       mountPath: /etc/deploy-key
@@ -91,6 +87,9 @@ Volumes for deploy key and cloned repo.
   secret:
     secretName: {{ .Values.deployKey.secretName }}
     defaultMode: 0400
+    items:
+      - key: {{ .Values.deployKey.secretKey }}
+        path: ssh-privatekey
 - name: repo
   emptyDir: {}
 {{- end }}
