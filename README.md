@@ -1,26 +1,76 @@
 # mail-support-scripts
 
-Support scripts for IETF mail infrastructure, designed to run as Kubernetes CronJobs.
+Support scripts for IETF mail infrastructure, deployed as Kubernetes CronJobs via Helm.
 
-## Usage
+## Architecture
 
-Deploy using the Helm chart:
+Each CronJob uses an init container to clone this repo via SSH deploy key, then runs the
+script with `uv run` against the local checkout.
+
+## Prerequisites
+
+- A read-only [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) for this repo
+
+## Helm Chart
 
 ```bash
-helm install mail-support-scripts ./charts/mail-support-scripts \
-  -n mail \
-  --set dtAliasSync.enabled=true \
-  --set dtAliasSync.secrets.datatrackerToken.existingSecretName=datatracker \
-  --set dtAliasSync.secrets.db.existingSecretName=db-postfix \
-  --set globalAllowlistSync.enabled=true \
-  --set globalAllowlistSync.secrets.datatrackerToken.existingSecretName=datatracker \
-  --set globalAllowlistSync.secrets.mailman.existingSecretName=mailman-api \
-  --set globalAllowlistSync.secrets.postconfirmDb.existingSecretName=db-postconfirm
+helm repo add mail-support-scripts https://ietf-tools.github.io/mail-support-scripts
+helm install mail-support-scripts mail-support-scripts/mail-support-scripts -n mail -f values.yaml
 ```
 
-Scripts are fetched directly from GitHub at runtime using `uv run`, so no container rebuild is required when scripts are updated.
+Example `values.yaml`:
 
-See `charts/mail-support-scripts/values.yaml` for all configuration options.
+```yaml
+deployKey:
+  secretName: mail-secrets-env
+  secretKey: MAIL_SUPPORT_SCRIPTS_DEPLOY_KEY
+
+commonEnv:
+  DATATRACKER_URL: https://datatracker.staging.ietf.org
+  ## During testing this replaces the destination address for all aliases built by dt-alias-sync
+  TEST_OVERRIDE_ADDRESSES: noreply@ietf.org
+
+dtAliasSync:
+  env:
+    MAIL_HOST: uat.tools-dev.org
+    DB_HOST: db-email-staging-rw
+    DB_PORT: "5432"
+    DB_NAME: postfix
+  secrets:
+    - name: DATATRACKER_TOKEN
+      secretName: mail-secrets-env
+      key: DATATRACKER_API_TOKEN
+    - name: DB_USER
+      secretName: mail-secrets-env
+      key: POSTFIX_DB_USER
+    - name: DB_PASS
+      secretName: mail-secrets-env
+      key: POSTFIX_DB_PASS
+
+globalAllowlistSync:
+  env:
+    GLOBAL_ALLOWLIST_FQDN: global-allowlist@uat.tools-dev.org
+    MAILMAN_API_URL: http://mailman:8001/3.1
+    POSTCONFIRM_DB_HOST: db-email-staging-rw
+    POSTCONFIRM_DB_PORT: "5432"
+    POSTCONFIRM_DB_NAME: postconfirm
+  secrets:
+    - name: DATATRACKER_TOKEN
+      secretName: mail-secrets-env
+      key: DATATRACKER_API_TOKEN
+    - name: MAILMAN_API_USER
+      secretName: mail-secrets-env
+      key: mailmanApiUser
+    - name: MAILMAN_API_PASSWORD
+      secretName: mail-secrets-env
+      key: mailmanApiPass
+    - name: POSTCONFIRM_DB_USER
+      secretName: mail-secrets-env
+      key: POSTCONFIRM_DB_USER
+    - name: POSTCONFIRM_DB_PASS
+      secretName: mail-secrets-env
+      key: POSTCONFIRM_DB_PASS
+```
 
 ## Scripts
 
