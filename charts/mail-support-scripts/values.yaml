@@ -8,12 +8,7 @@ gitImage:
   tag: v2.52.0
   pullPolicy: IfNotPresent
 
-scriptsRepo: git@github.com:ietf-tools/mail-support-scripts.git
-scriptsRef: main
-
-deployKey:
-  secretName: mail-support-scripts-deploy-key
-  secretKey: ssh-privatekey
+scriptsRepo: https://github.com/ietf-tools/mail-support-scripts.git
 
 commonEnv: {}
 
