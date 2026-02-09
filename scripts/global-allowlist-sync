@@ -30,6 +30,8 @@ import psycopg
 
 DATATRACKER_URL = os.environ.get("DATATRACKER_URL", "https://datatracker.ietf.org")
 DATATRACKER_TOKEN = os.environ.get("DATATRACKER_TOKEN")
+CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID")
+CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET")
 
 MAILMAN_API_URL = os.environ.get("MAILMAN_API_URL")
 MAILMAN_API_USER = os.environ.get("MAILMAN_API_USER")
@@ -79,10 +81,14 @@ def should_ignore(val: str) -> bool:
 def fetch_datatracker_emails() -> set[str]:
     logger.info("fetching active emails from datatracker...")
     url = f"{DATATRACKER_URL}/api/person/email/"
-    headers = {"X-Api-Key": DATATRACKER_TOKEN} if DATATRACKER_TOKEN else {}
-
-    if not DATATRACKER_TOKEN:
+    headers = {}
+    if DATATRACKER_TOKEN:
+        headers["X-Api-Key"] = DATATRACKER_TOKEN
+    else:
         logger.warning("DATATRACKER_TOKEN not set")
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
 
     resp = httpx.get(url, headers=headers, timeout=120)
     resp.raise_for_status()
