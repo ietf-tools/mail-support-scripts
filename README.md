@@ -7,10 +7,6 @@ Support scripts for IETF mail infrastructure, deployed as Kubernetes CronJobs vi
 Each CronJob uses an init container to clone this repo via SSH deploy key, then runs the
 script with `uv run` against the local checkout.
 
-## Prerequisites
-
-- A read-only [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) for this repo
-
 ## Helm Chart
 
 ```bash
@@ -21,10 +17,6 @@ helm install mail-support-scripts mail-support-scripts/mail-support-scripts -n m
 Example `values.yaml`:
 
 ```yaml
-deployKey:
-  secretName: mail-secrets-env
-  secretKey: MAIL_SUPPORT_SCRIPTS_DEPLOY_KEY
-
 commonEnv:
   DATATRACKER_URL: https://datatracker.staging.ietf.org
   ## During testing this replaces the destination address for all aliases built by dt-alias-sync
