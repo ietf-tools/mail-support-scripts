@@ -25,6 +25,8 @@ import psycopg
 
 DATATRACKER_URL = os.environ.get("DATATRACKER_URL", "https://datatracker.ietf.org")
 DATATRACKER_TOKEN = os.environ.get("DATATRACKER_TOKEN")
+CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID")
+CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET")
 
 MAIL_HOST = os.environ.get("MAIL_HOST", "")
 DOMAIN_MAP = {"ietf": MAIL_HOST, "iab": MAIL_HOST, "irtf": MAIL_HOST}
@@ -48,10 +50,14 @@ def get_db_connection():
 
 def fetch_from_api(endpoint: str, alias_type: str) -> list[dict]:
     url = f"{DATATRACKER_URL}{endpoint}"
-    headers = {"X-Api-Key": DATATRACKER_TOKEN} if DATATRACKER_TOKEN else {}
-    
-    if not DATATRACKER_TOKEN:
+    headers = {}
+    if DATATRACKER_TOKEN:
+        headers["X-Api-Key"] = DATATRACKER_TOKEN
+    else:
         log("warning: DATATRACKER_TOKEN not set")
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     
     resp = httpx.get(url, headers=headers, timeout=120)
     resp.raise_for_status()
