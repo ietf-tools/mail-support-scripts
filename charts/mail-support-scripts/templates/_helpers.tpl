@@ -70,7 +70,7 @@ Init container that clones the scripts repo via HTTPS.
     - sh
     - -c
     - |
-      git clone --depth 1 --branch {{ .Chart.Version }} {{ .Values.scriptsRepo }} /repo
+      git -c advice.detachedHead=false clone --depth 1 --branch {{ .Chart.Version }} {{ .Values.scriptsRepo }} /repo
   volumeMounts:
     - name: repo
       mountPath: /repo
