@@ -9,8 +9,8 @@
 """Rewrite one string in every mailman list's accept_these_nonmembers field.
 
 The column is a SQLAlchemy PickleType wrapping a MutableList[str]. We load
-the pickle, replace any list entry equal to OLD with NEW, drop duplicates,
-and re-pickle. Dry-run by default; pass --apply to write.
+the pickle, replace any list entry equal to OLD with NEW, and re-pickle.
+Dry-run by default; pass --apply to write.
 
 Examples:
   ./rename_accept_these_nonmembers.py @global-whitelist.ietf.org @global-whitelist@ietf.org
