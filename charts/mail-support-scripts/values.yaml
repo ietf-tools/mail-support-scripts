@@ -38,6 +38,10 @@ podLabels: {}
 
 resources: {}
 
+dnsPolicy: ""
+
+dnsConfig: {}
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
