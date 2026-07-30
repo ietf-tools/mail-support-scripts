@@ -28,6 +28,13 @@ spec:
         spec:
           serviceAccountName: {{ include "mail-support-scripts.serviceAccountName" . }}
           restartPolicy: OnFailure
+          {{- with .Values.dnsPolicy }}
+          dnsPolicy: {{ . }}
+          {{- end }}
+          {{- with .Values.dnsConfig }}
+          dnsConfig:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.nodeSelector }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}
