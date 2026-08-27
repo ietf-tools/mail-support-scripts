@@ -1,77 +1,450 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["psycopg[binary]"]
+# ///
 """
-Convert Postfix virtual alias file to SQL INSERT statements.
+Migrate mail2's /a/postfix/virtual into the postfix database.
 
-Splits into:
-- virtual_alias table (entries with @ in the key)
-- relay_domains table (bare domain entries without @)
+    ./convert-virtual-aliases ./virtual --names ./virtual-names.toml --diff
+    ./convert-virtual-aliases ./virtual --names ./virtual-names.toml --diff --apply
+
+Three kinds of line, three destinations:
+
+    example.org        anything      bare domain, declares a mail domain -> domain
+    @dmarc.example.org dmarc-reverse     catch-all                       -> virtual
+    old@example.org    new@example.org   alias                           -> virtual
+
+right-hand side may also contain bare names with no @. mail2 resolved those
+through its alias files. Most bare names are mailman lists and resolve from the
+mailman database; the rest are pipes, files and local users, or names that
+already bounce on mail2.
+
+Those, and the internal LMTP transports, are site data: real addresses and
+internal routing. They live in the names file, not in this repo, which is
+public. See NAMES_TEMPLATE for the format. Keep the file with the virtual file
+it describes.
 """
 
+import argparse
+import os
 import sys
+import tomllib
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+import psycopg
+
+DB_HOST = os.environ.get("DB_HOST", "db-rw")
+DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_NAME = os.environ.get("DB_NAME", "postfix")
+DB_USER = os.environ.get("DB_USER", "postfix")
+DB_PASS = os.environ.get("DB_PASS", "")
+MAILMAN_DB = os.environ.get("MAILMAN_DB_NAME", "mailman")
+MAILMAN_USER = os.environ.get("MAILMAN_DB_USER", DB_USER)
+MAILMAN_PASS = os.environ.get("MAILMAN_DB_PASS", DB_PASS)
+NAMES_FILE = os.environ.get("VIRTUAL_NAMES_FILE", "")
+
+INTERNAL_SOURCE = "manual"
+
+DISCARD = object()  # accept, then bin
+
+NAMES_TEMPLATE = """\
+# names a bare rhs cannot resolve on its own. every key is lower case.
+dead_lists = ["asrg"]           # mailman 2 lists mailman 3 never carried
+stale = ["temp123"]             # patternless one-offs that bounce on mail2 too
+discard = ["devnull"]           # accept, then bin
+
+[local]                         # name = "what it becomes"
+rtsupport = "support@example.org"
+
+[transports]                    # domains alias expansion produces, and their route
+"datatracker.example.internal" = "lmtp:[emposter.example.internal]:2424"
+"""
+
+LIST_SUFFIXES = (
+    "-admin",
+    "-owner",
+    "-request",
+    "-bounces",
+    "-confirm",
+    "-join",
+    "-leave",
+    "-subscribe",
+    "-unsubscribe",
+)
 
 
-def parse_virtual_file(lines):
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith('#'):
+@dataclass
+class Names:
+    """Site data: what the bare names on the rhs mean here."""
+
+    local: dict = field(default_factory=dict)  # name -> address list or DISCARD
+    dead_lists: set = field(default_factory=set)  # dead, with the whole suffix set
+    stale: set = field(default_factory=set)  # dead, exact match only
+    transports: dict = field(default_factory=dict)  # internal domain -> transport
+
+
+@dataclass
+class Plan:
+    """Everything the run decided, before anything is written."""
+
+    new_domains: list = field(default_factory=list)  # rows for the domain table
+    empty_domains: list = field(default_factory=list)  # declared but addressless
+    aliases: list = field(default_factory=list)  # (email, destination, transport)
+    internal: list = field(default_factory=list)  # emposter LMTP routes
+    unchanged: list = field(default_factory=list)  # already correct in the db
+    owned: list = field(default_factory=list)  # kept by a protected source
+    mailman_owned: list = field(default_factory=list)  # live lists, no row needed
+    conflicts: list = field(default_factory=list)  # db disagrees; needs a human
+    dropped: list = field(default_factory=list)  # dead on mail2 too
+    unresolved: list = field(default_factory=list)  # bare name we cannot place
+
+
+def log(msg: str) -> None:
+    print(f"-- {msg}", file=sys.stderr)
+
+
+def connect(dbname: str, user: str, password: str):
+    return psycopg.connect(
+        host=DB_HOST, port=DB_PORT, dbname=dbname, user=user, password=password
+    )
+
+
+def parse(lines):
+    """Yield (lineno, key, [rhs elements]) for each meaningful line."""
+    for lineno, raw in enumerate(lines, 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
             continue
-        
         parts = line.split(None, 1)
-        if len(parts) == 2:
-            entries.append((parts[0], parts[1]))
-        elif len(parts) == 1:
-            entries.append((parts[0], ''))
-
-    return entries
+        key = parts[0].lower()
+        rhs = parts[1] if len(parts) == 2 else ""
+        elements = [e.strip() for e in rhs.replace(" ", ",").split(",") if e.strip()]
+        yield lineno, key, elements
 
 
-def main():
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], 'r') as f:
-            lines = f.readlines()
-    else:
-        lines = sys.stdin.readlines()
+def load_names(path: str) -> Names:
+    """Read the names file. Every key is lowercased on the way in."""
+    with open(path, "rb") as fh:
+        data = tomllib.load(fh)
 
-    entries = parse_virtual_file(lines)
+    unknown = set(data) - {"local", "transports", "dead_lists", "stale", "discard"}
+    if unknown:
+        raise ValueError(f"unknown sections: {', '.join(sorted(unknown))}")
 
-    aliases = []
-    domains = []
-    catchalls = []
+    local = {k.lower(): v for k, v in data.get("local", {}).items()}
+    for name in data.get("discard", []):
+        local[name.lower()] = DISCARD
 
-    for key, value in entries:
-        if key.startswith('@'):
-            catchalls.append((key, value))
-        elif '@' in key:
-            aliases.append((key, value))
+    return Names(
+        local=local,
+        dead_lists={n.lower() for n in data.get("dead_lists", [])},
+        stale={n.lower() for n in data.get("stale", [])},
+        transports=data.get("transports", {}),
+    )
+
+
+def load_mailman_names(conn):
+    """local-part -> [address], from the mailman database."""
+    listnames = defaultdict(list)
+    with conn.cursor() as cur:
+        cur.execute("SELECT lower(email) FROM mailman_recipients")
+        for (addr,) in cur:
+            listnames[addr.split("@", 1)[0]].append(addr)
+    return listnames
+
+
+def load_postfix_state(conn):
+    """Existing virtual entries and mail domains, both lowercased."""
+    existing, owners, transports = {}, {}, {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT lower(email), destination, source, transport FROM virtual")
+        for addr, dest, source, transport in cur:
+            existing[addr] = dest
+            owners[addr] = source
+            transports[addr] = transport
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT lower(mail_host) FROM domain")
+        domains = {row[0] for row in cur}
+
+    return existing, owners, transports, domains
+
+
+def is_dead_list(name: str, names: Names) -> bool:
+    """True for any address belonging to a list Mailman 3 does not carry."""
+    for suffix in LIST_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)] in names.dead_lists
+    return name in names.dead_lists
+
+
+def same_recipients(a, b):
+    """Compare destinations as sets. The two sides differ in comma spacing."""
+    split = lambda s: {e.strip().lower() for e in s.split(",") if e.strip()}
+    return split(a) == split(b)
+
+
+def resolve(element, key_domain, names, listnames, existing):
+    """Return (destination, how) or (None, reason) for one rhs element."""
+    if "@" in element:
+        return element, "direct"
+
+    name = element.lower()
+    if name in names.local:
+        dest = names.local[name]
+        if dest is DISCARD:
+            return DISCARD, "discard"
+        return dest, ("alias" if dest else "alias-drop")
+
+    # known dead before the mailman lookup, so a name that happens to collide
+    # with a live list or a leftover virtual row still drops.
+    if is_dead_list(name, names) or name in names.stale:
+        return None, "stale-drop"
+
+    same_domain = f"{name}@{key_domain}"
+    if same_domain in listnames.get(name, []):
+        return same_domain, "mailman"
+    if listnames.get(name):
+        return listnames[name][0], "mailman-other-domain"
+    if same_domain in existing:
+        return same_domain, "virtual"
+
+    # mailman 2 used the owner address "-admin". mailman 3 uses "-owner".
+    if name.endswith("-admin"):
+        owner = f"{name[: -len('-admin')]}-owner"
+        if listnames.get(owner):
+            for addr in listnames[owner]:
+                if addr.endswith(f"@{key_domain}"):
+                    return addr, "mailman-admin-owner"
+            return listnames[owner][0], "mailman-admin-owner"
+
+    return None, "unresolved"
+
+
+def convert_key(key, elements, names, listnames, existing):
+    """Turn one virtual line into a tagged result:
+
+    ("row", destination, transport)   write or compare this virtual row
+    ("drop", None, None)              every element is dead; drop the key
+    ("unresolved", [names], None)     bare names we cannot place
+    """
+    if key.startswith("@"):
+        # catch-all. mail2 pointed these at a pipe.
+        # here the domain's own transport carries it, so the destination is empty.
+        return "row", "", "relay:"
+
+    resolved, problems, discards = [], [], 0
+    for element in elements:
+        dest, how = resolve(element, key.split("@", 1)[1], names, listnames, existing)
+        if how == "unresolved":
+            problems.append(element)
+        elif dest is DISCARD:
+            discards += 1
+        elif dest:
+            resolved.append(dest)
+
+    if problems:
+        return "unresolved", problems, None
+    if resolved:
+        return "row", ",".join(dict.fromkeys(resolved)), "relay:"
+    if discards:
+        # empty destination makes virtual_alias_maps ignore the row, so the
+        # address stays valid and transport bins it.
+        return "row", "", "discard:"
+    return "drop", None, None
+
+
+def build_plan(
+    entries, names, listnames, existing, owners, transports, existing_domains, protected
+):
+    plan = Plan()
+    mailman_addrs = {addr for addrs in listnames.values() for addr in addrs}
+
+    for lineno, key, elements in entries:
+        if "@" not in key:
+            if key not in existing_domains:
+                plan.new_domains.append(key)
+            continue
+
+        kind, destination, transport = convert_key(
+            key, elements, names, listnames, existing
+        )
+
+        # mailman already owns its own addresses: postfix_lmtp accepts them and
+        # transport_maps routes them, with no virtual row needed. mail2
+        # deliberately diverts a few list addresses so carry those rows,
+        # they shadow the list on purpose.
+        if key in mailman_addrs and (
+            kind != "row" or same_recipients(destination, key)
+        ):
+            plan.mailman_owned.append((key, elements, key in existing))
+            continue
+
+        if kind == "unresolved":
+            plan.unresolved.append((lineno, key, destination))
+            continue
+        if kind == "drop":
+            plan.dropped.append((key, elements))
+            continue
+
+        current = existing.get(key)
+        if current is None:
+            plan.aliases.append((key, destination, transport))
+        elif same_recipients(current, destination) and transports.get(key) == transport:
+            plan.unchanged.append(key)
+        elif owners.get(key) in protected:
+            # Another system maintains this row and keeps it fresher than mail2.
+            plan.owned.append((key, owners[key], destination))
         else:
-            domains.append(key)
+            plan.conflicts.append((key, current, destination))
 
-    print("BEGIN;")
-    print()
+    # relay domain with no addresses, so only declare a domain that ends the run with at least one virtual entry.
+    populated = {addr.split("@", 1)[1] for addr in existing if "@" in addr}
+    populated |= {key.split("@", 1)[1] for key, _, _ in plan.aliases if "@" in key}
+    plan.empty_domains = [d for d in plan.new_domains if d not in populated]
+    plan.new_domains = [d for d in plan.new_domains if d in populated]
 
-    print("-- Relay domains")
-    print()
-    for domain in domains:
-        print(f"INSERT INTO relay_domains (domain) VALUES ('{domain}')")
-        print("ON CONFLICT (domain) DO NOTHING;")
-        print()
+    # emposter routes are ours, not mail2's, so they are not in the virtual file.
+    for domain, transport in names.transports.items():
+        if transports.get(domain) != transport:
+            plan.internal.append((domain, "", transport))
 
-    print("-- Virtual aliases")
-    print()
-    for email, destination in aliases:
-        print("INSERT INTO virtual_alias (email, destination, source)")
-        print(f"VALUES ('{email}', '{destination}', 'static');")
-        print()
-
-    print("COMMIT;")
-
-    if catchalls:
-        print()
-        print("-- WARNING: The following catch-all entries were skipped.")
-        for email, destination in catchalls:
-            print(f"--   {email} -> {destination}")
+    return plan
 
 
-if __name__ == '__main__':
-    main()
+def report(plan, path):
+    for domain in plan.new_domains:
+        log(f"domain     + {domain}")
+    for domain in plan.empty_domains:
+        log(f"domain     - {domain} (no addresses, not declared)")
+    for domain, _, transport in plan.internal:
+        log(f"internal   + {domain} via {transport}")
+    for key, destination, transport in plan.aliases:
+        log(f"virtual    + {key} -> {destination or transport}")
+    for key, source, destination in plan.owned:
+        log(f"owned      = {key} kept by {source}, mail2 said {destination}")
+    for key, current, destination in plan.conflicts:
+        log(f"CONFLICT   ! {key}: have {current}, mail2 says {destination}")
+    for key, elements, shadows in plan.mailman_owned:
+        live = "still in virtual, shadows the list" if shadows else "ok"
+        log(
+            f"mailman    = {key} left to mailman, mail2 said {','.join(elements)} [{live}]"
+        )
+    for key, elements in plan.dropped:
+        log(f"dropped    - {key} (was {','.join(elements)})")
+    for lineno, key, problems in plan.unresolved:
+        log(f"UNRESOLVED : {path}:{lineno} {key} -> {','.join(problems)}")
+
+
+def summarise(plan, total):
+    log(
+        f"{total} lines: {len(plan.new_domains)} new domains "
+        f"({len(plan.empty_domains)} skipped as empty), "
+        f"{len(plan.aliases)} new aliases, "
+        f"{len(plan.internal)} emposter routes, "
+        f"{len(plan.unchanged)} unchanged, {len(plan.owned)} owned elsewhere, "
+        f"{len(plan.mailman_owned)} left to mailman, "
+        f"{len(plan.conflicts)} conflicts, {len(plan.dropped)} dropped by map, "
+        f"{len(plan.unresolved)} unresolved"
+    )
+
+
+def apply_plan(pg_conn, plan, source):
+    rows = [(k, d, t, source) for k, d, t in plan.aliases]
+    rows += [(k, d, t, INTERNAL_SOURCE) for k, d, t in plan.internal]
+    with pg_conn.transaction():
+        with pg_conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO domain (mail_host) VALUES (%s) ON CONFLICT DO NOTHING",
+                [(d,) for d in plan.new_domains],
+            )
+            cur.executemany(
+                """
+                INSERT INTO virtual (email, destination, transport, source)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (email) DO UPDATE
+                    SET destination = EXCLUDED.destination,
+                        transport = EXCLUDED.transport,
+                        source = EXCLUDED.source,
+                        updated = now()
+                """,
+                rows,
+            )
+    log(
+        f"applied {len(plan.new_domains)} domains, {len(plan.aliases)} aliases, "
+        f"{len(plan.internal)} emposter routes"
+    )
+    log(
+        f"conflicts and unresolved were NOT written: "
+        f"{len(plan.conflicts) + len(plan.unresolved)} lines"
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("file", help="mail2:/a/postfix/virtual")
+    ap.add_argument(
+        "--names",
+        default=NAMES_FILE,
+        help="site data for bare rhs names, toml (env VIRTUAL_NAMES_FILE)",
+    )
+    ap.add_argument("--source", default="mail2-migration", help="virtual.source value")
+    ap.add_argument(
+        "--protect-source",
+        action="append",
+        default=[],
+        help="never touch rows with this source (repeatable, default datatracker)",
+    )
+    ap.add_argument("--diff", action="store_true", help="report to stderr")
+    ap.add_argument("--apply", action="store_true", help="write to the database")
+    args = ap.parse_args()
+
+    # the file carries the routing facts this script cannot derive. without it
+    # every bare name would look unresolvable, so there is no useful default.
+    if not args.names:
+        log(f"--names is required. the file looks like:\n\n{NAMES_TEMPLATE}")
+        return 2
+    try:
+        names = load_names(args.names)
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+        log(f"cannot read {args.names}: {exc}")
+        return 2
+
+    with open(args.file) as fh:
+        entries = list(parse(fh))
+
+    pg_conn = connect(DB_NAME, DB_USER, DB_PASS)
+
+    # without this every list address looks unresolvable and we
+    # can't tell which keys mailman already owns, so the run would
+    # quietly write rows that divert live lists.
+    try:
+        mailman_conn = connect(MAILMAN_DB, MAILMAN_USER, MAILMAN_PASS)
+    except psycopg.Error as exc:
+        log(f"cannot reach the mailman database, refusing to guess: {exc}")
+        return 2
+
+    listnames = load_mailman_names(mailman_conn)
+    existing, owners, transports, domains = load_postfix_state(pg_conn)
+    protected = set(args.protect_source or ["datatracker"])
+
+    plan = build_plan(
+        entries, names, listnames, existing, owners, transports, domains, protected
+    )
+
+    if args.diff or not args.apply:
+        report(plan, args.file)
+    summarise(plan, len(entries))
+
+    if not args.apply:
+        log("dry run, nothing written. --apply to write.")
+        return 1 if plan.unresolved or plan.conflicts else 0
+
+    apply_plan(pg_conn, plan, args.source)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
