@@ -3,3 +3,8 @@ __pycache__/
 .env
 .mypy_cache/
 .vscode/
+
+# site data, never in this repo
+virtual
+virtual-names.toml
+plan.sql
