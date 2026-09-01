@@ -372,6 +372,7 @@ def apply_plan(pg_conn, plan, source):
                 """,
                 rows,
             )
+    pg_conn.commit()
     log(
         f"applied {len(plan.new_domains)} domains, {len(plan.aliases)} aliases, "
         f"{len(plan.internal)} emposter routes"
