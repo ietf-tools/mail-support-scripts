@@ -1,0 +1,92 @@
+{{- if .Values.listsPostconfirmSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mail-support-scripts.fullname" . }}-lists-postconfirm-sync
+  labels:
+    {{- include "mail-support-scripts.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lists-postconfirm-sync
+spec:
+  schedule: {{ .Values.listsPostconfirmSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "mail-support-scripts.labels" . | nindent 12 }}
+            app.kubernetes.io/component: lists-postconfirm-sync
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          serviceAccountName: {{ include "mail-support-scripts.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.dnsPolicy }}
+          dnsPolicy: {{ . }}
+          {{- end }}
+          {{- with .Values.dnsConfig }}
+          dnsConfig:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          initContainers:
+            {{- include "mail-support-scripts.fetchScriptsInitContainer" . | nindent 12 }}
+          containers:
+            - name: lists-postconfirm-sync
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - uv
+                - run
+                - --script
+                - /scripts/lists-postconfirm-sync
+                {{- range .Values.listsPostconfirmSync.args }}
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                {{- range $k, $v := .Values.commonEnv }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
+                {{- end }}
+                {{- range $k, $v := .Values.listsPostconfirmSync.env }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
+                {{- end }}
+                {{- range .Values.listsPostconfirmSync.secrets }}
+                - name: {{ .name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .secretName }}
+                      key: {{ .key }}
+                {{- end }}
+              {{- with .Values.listsPostconfirmSync.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                {{- include "mail-support-scripts.scriptVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "mail-support-scripts.scriptVolumes" . | nindent 12 }}
+{{- end }}
