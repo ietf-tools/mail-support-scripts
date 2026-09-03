@@ -19,13 +19,9 @@ Usage:
 import argparse
 import logging
 import os
-import re
-from typing import Optional
 
-import httpx
 import mailmanclient
 import psycopg
-
 
 MAILMAN_API_URL = os.environ.get("MAILMAN_API_URL")
 MAILMAN_API_USER = os.environ.get("MAILMAN_API_USER")
@@ -61,7 +57,7 @@ class MailmanClient:
         return self._client
     def get_all_mailman_lists(self) -> set[str]:
         logger.info("fetching all mailman lists...")
-        mail_lists = {list.rest_data['fqdn_listname'] for list in mm.client.lists}
+        mail_lists = {list.rest_data['fqdn_listname'] for list in self.client.lists}
         logger.debug("got %d lists from mailman", len(mail_lists))
         return mail_lists
 
@@ -71,20 +67,20 @@ def get_postconfirm_db_connection():
     return psycopg.connect(conninfo)
 
 
-def sync_postconfirm_challenges(addresses: set[str], apply: bool) -> int:
+def sync_postconfirm_challenges(mail_lists: set[str], apply: bool) -> int:
     logger.info("syncing to postconfirm challenges...")
 
     with get_postconfirm_db_connection() as conn, conn.cursor() as cur:
         for list in mail_lists:
-  .          cur.execute(
-  .              """
-  .              INSERT INTO challenges (challenge, action_to_take, source, challenge_type)
-  .              VALUES (%s, 'challenge', 'challenge-sync', 'E')
-  .              ON CONFLICT (challenge) DO UPDATE
+             cur.execute(
+                 """
+                 INSERT INTO challenges (challenge, action_to_take, source, challenge_type)
+                 VALUES (%s, 'challenge', 'challenge-sync', 'E')
+                 ON CONFLICT (challenge) DO UPDATE
                  SET action_to_take = 'challenge', source = 'challenge-sync'
-  .              """,
-  .              (list,)
-  .          )
+                 """,
+                 (list,)
+             )
 
         if not apply:
             return len(mail_lists)
@@ -109,6 +105,8 @@ def main():
 
     if not args.apply:
         logger.info("DRY RUN - no changes will be made (use --apply to apply)")
+
+    mail_lists = set()
 
     mm = MailmanClient()
 
