@@ -1,0 +1,129 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "psycopg[binary]", "mailmanclient"]
+# ///
+"""
+Sync mailman lists to Postconfirm for the purpose of challenging them.
+
+1. Fetches all Mailman lists
+2. Subtracts all lists to exclude from postconfirm challenges
+3. Syncs to postconfirm's challenge table
+
+Usage:
+    ./lists-to-postconfirm                    # dry-run, show what would change
+    ./lists-to-postconfirm --apply            # apply changes
+    ./lists-to-postconfirm --apply --verbose  # apply with detailed output
+"""
+
+import argparse
+import logging
+import os
+
+import mailmanclient
+import psycopg
+
+MAILMAN_API_URL = os.environ.get("MAILMAN_API_URL")
+MAILMAN_API_USER = os.environ.get("MAILMAN_API_USER")
+MAILMAN_API_PASSWORD = os.environ.get("MAILMAN_API_PASSWORD")
+
+
+POSTCONFIRM_DB_HOST = os.environ.get("POSTCONFIRM_DB_HOST", "db-rw")
+POSTCONFIRM_DB_PORT = os.environ.get("POSTCONFIRM_DB_PORT", "5432")
+POSTCONFIRM_DB_NAME = os.environ.get("POSTCONFIRM_DB_NAME", "postconfirm")
+POSTCONFIRM_DB_USER = os.environ.get("POSTCONFIRM_DB_USER")
+POSTCONFIRM_DB_PASS = os.environ.get("POSTCONFIRM_DB_PASS")
+
+logger = logging.getLogger(__name__)
+
+
+no_challenge = {
+    'dmarc-report@ietf.org',
+    'ietf-rfps@ietf.org',
+    'travel-grants@irtf.org',
+}
+
+
+class MailmanClient:
+    def __init__(self):
+        self._client = None
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = mailmanclient.Client(
+                MAILMAN_API_URL,
+                MAILMAN_API_USER,
+                MAILMAN_API_PASSWORD,
+            )
+        return self._client
+    def get_all_mailman_lists(self) -> set[str]:
+        logger.info("fetching all mailman lists...")
+        mail_lists = {list.rest_data['fqdn_listname'] for list in self.client.lists}
+        logger.debug("got %d lists from mailman", len(mail_lists))
+        return mail_lists
+
+
+def get_postconfirm_db_connection():
+    conninfo = f"host={POSTCONFIRM_DB_HOST} port={POSTCONFIRM_DB_PORT} dbname={POSTCONFIRM_DB_NAME} user={POSTCONFIRM_DB_USER} password={POSTCONFIRM_DB_PASS}"
+    return psycopg.connect(conninfo)
+
+
+def sync_postconfirm_challenges(mail_lists: set[str], apply: bool) -> int:
+    logger.info("syncing to postconfirm challenges...")
+
+    with get_postconfirm_db_connection() as conn, conn.cursor() as cur:
+        for list in mail_lists:
+             cur.execute(
+                 """
+                 INSERT INTO challenges (challenge, action_to_take, source, challenge_type)
+                 VALUES (%s, 'challenge', 'challenge-sync', 'E')
+                 ON CONFLICT (challenge) DO UPDATE
+                 SET action_to_take = 'challenge', source = 'challenge-sync'
+                 """,
+                 (list,)
+             )
+
+        if not apply:
+            return len(mail_lists)
+
+        return len(mail_lists)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sync Mailman lists to Postconfirm challenges",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply changes (default is dry-run)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        format="%(levelname)s: %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+    )
+
+    if not args.apply:
+        logger.info("DRY RUN - no changes will be made (use --apply to apply)")
+
+    mail_lists = set()
+
+    mm = MailmanClient()
+
+    mail_lists |= mm.get_all_mailman_lists()
+
+    mail_lists -= no_challenge
+
+    logger.info("total mailing lists: %d", len(mail_lists))
+
+    sync_postconfirm_challenges(mail_lists, apply=args.apply)
+
+    if args.apply:
+        logger.info("sync complete")
+    else:
+        logger.info("dry run complete - use --apply to make changes")
+
+
+if __name__ == "__main__":
+    main()
