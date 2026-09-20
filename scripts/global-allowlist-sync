@@ -121,8 +121,6 @@ class MailmanClient:
         logger.info("fetching all mailman subscribers...")
         emails = set()
         for mlist in self.client.lists:
-            if mlist.fqdn_listname == GLOBAL_ALLOWLIST_FQDN:
-                continue
             if re.match(r"^\d+all@", mlist.fqdn_listname):
                 continue
 
@@ -204,6 +202,24 @@ def get_postconfirm_db_connection():
     conninfo = f"host={POSTCONFIRM_DB_HOST} port={POSTCONFIRM_DB_PORT} dbname={POSTCONFIRM_DB_NAME} user={POSTCONFIRM_DB_USER} password={POSTCONFIRM_DB_PASS}"
     return psycopg.connect(conninfo)
 
+
+def fetch_confirmed_senders() -> set[str]:
+    """
+    Fetch addresses that have confirmed through postconfirm
+    These are stored in the postconfirm database's senders table.
+    """
+    logger.info("fetching confirmed addresses from postconfirm db...")
+    try:
+        with get_postconfirm_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT sender FROM senders WHERE action='accept' AND type='E'"
+                )
+                addresses = {row[0] for row in cur.fetchall()}
+        logger.debug("got %d confirmed addresses", len(addresses))
+        return addresses
+    except Exception as e:
+        logger.warning("could not fetch confirmed addresses: %s", e)
 
 def fetch_never_allow_addresses() -> set[str]:
     """
@@ -289,6 +305,8 @@ def main():
         logger.info("DRY RUN - no changes will be made (use --apply to apply)")
 
     addresses = set()
+
+    addresses |=  fetch_confirmed_senders()
 
     if not args.skip_datatracker:
         addresses |= fetch_datatracker_emails()
