@@ -41,6 +41,7 @@ no_challenge = {
     'dmarc-report@ietf.org',
     'ietf-rfps@ietf.org',
     'travel-grants@irtf.org',
+    'sponsorship@irtf.org',
 }
 
 
