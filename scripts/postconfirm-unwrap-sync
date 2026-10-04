@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Load wrap records for the senders postconfirm has confirmed.
+
+A reply to a wrapped address is only delivered while the postfix virtual
+table has a row for that wrap updated in the last 30 days (valid_wraps() in
+the rewriter).  The rewriter writes those rows when it wraps a sender's From;
+this script also writes them for every sender postconfirm has confirmed, so
+replies to a confirmed sender's wrap are accepted even when the rewriter
+hasn't seen them recently.
+
+Run it more often than every 30 days (e.g. daily): each run refreshes the
+rows' timestamp, and rows for senders who are no longer confirmed simply
+expire.  Existing rows are only refreshed, never changed, and only if they
+were written by the rewriter or by this script.
+
+The address functions below are copied from the rewriter's rewriter.py and
+must stay identical to it, or the keys written here won't match the ones it
+checks.  Configuration uses the rewriter's environment variables:
+
+  FORWARDING_DOMAIN   the domain wrapped addresses are in
+  REWRITE_DOMAINS     map[domain:rewrite-domain ...], to skip our own domains
+  DB_HOST, DB_PORT, DB_USER, DB_PASSWORD
+                      the database server, for both databases (libpq's PG*
+                      variables and PGPASSFILE also work)
+  DB_NAME             the postfix database (default: postfix); the
+                      postconfirm database is --postconfirm-db (default:
+                      postconfirm) on the same server
+
+Keep passwords in the environment or PGPASSFILE, not on the command line.
+
+By default it only reports what it would do: each row is listed as
+
+  new          no row for the wrap yet; it would be inserted
+  refresh      a current row from the rewriter or this script; updated is reset
+  revive       the same, but the row is over 30 days old, so the wrap starts
+               being accepted again
+  untouched    a row written by something else; it is left alone
+
+with the existing destination shown wherever it differs, since an existing
+row's destination is never changed.  The dry run only reads the postfix
+database; nothing changes unless --apply is given.
+
+  ./sync_confirmed_senders.py
+  ./sync_confirmed_senders.py --apply
+"""
+import argparse
+import os
+import re
+import sys
+
+import psycopg
+
+forwarding_domain = os.environ.get("FORWARDING_DOMAIN", "myaddr.com")
+rewrite_domains = os.environ.get("REWRITE_DOMAINS", "map[mydomain.com:dmarc.mydomain.com]")
+
+# the rewrite targets, e.g. dmarc.ietf.org; entries without a ':' are ignored
+rewrite_targets = {
+    x.split(":", 1)[1].lower() for x in rewrite_domains[4:-1].split() if ":" in x
+}
+
+# --- copied from rewriter.py: keep in step ------------------------------------
+
+# matched against the unquoted (internal) form of the address, whose local
+# part may itself contain @; the original domain may be UTF-8 (SMTPUTF8)
+# (list bounces are excluded by is_wrapped())
+wrapped_regex = rf"^.+=40[-a-z0-9.\x80-\U0010ffff]+@{re.escape(forwarding_domain)}$"
+wrapped_mailmatch = re.compile(wrapped_regex, re.IGNORECASE)
+
+# Mailman 3 bounce addresses: <list>-bounces@, VERP <list>-bounces+<user>=<domain>@
+# and probes <list>-bounces+<token>@; any of them may also be wrapped by us
+# (<list>-bounces=40<domain>@, <list>-bounces+<user>=<domain>=40<domain>@)
+listbounce_regex = r"^[^@+]+-bounces(?:\+[^@]*|=40[^@]*)?@"
+listbounce_mailmatch = re.compile(listbounce_regex, re.IGNORECASE)
+
+_atom = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~\x80-\U0010ffff-]+")
+
+def unquote_local(local):
+    if len(local) >= 2 and local[0] == local[-1] == '"':
+        return re.sub(r'\\(.)', r'\1', local[1:-1])
+    return local
+
+def quote_local(local):
+    # RFC 5321/5322: a local part that is not a dot-atom must be quoted
+    if local and all(_atom.fullmatch(p) for p in local.split('.')):
+        return local
+    return '"' + local.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+def internal_addr(addr):
+    # Postfix's internal (unquoted) form, as used for virtual table lookups
+    local, _, domain = addr.rpartition('@')
+    return f"{unquote_local(local)}@{domain}".lower()
+
+def wrap_addr(addr, new_domain):
+    local, _, domain = addr.rpartition('@')
+    return f"{quote_local(unquote_local(local) + '=40' + domain.lower())}@{new_domain}"
+
+def is_wrapped(addr):
+    # list bounces are wrapped too, but unwrap_list_bounces() handles those
+    key = internal_addr(addr)
+    return bool(wrapped_mailmatch.search(key)) and not listbounce_mailmatch.search(key)
+
+# --- end of copy ------------------------------------------------------------------
+
+# the same filter as postconfirm's extract_confirmed_accounts.py
+CONFIRMED_SQL = """
+    SELECT sender FROM senders
+    WHERE action = 'accept' AND type = 'E' AND source = ANY(%s)
+"""
+
+# what is already there for the keys we would write; current matches the
+# rewriter's valid_wraps() window
+EXISTING_SQL = """
+    SELECT email, destination, source, updated >= NOW() - INTERVAL '30 DAYS' AS current
+    FROM virtual WHERE email = ANY(%s)
+"""
+
+# the sources whose rows the upsert refreshes
+OUR_SOURCES = ("rewriter", "postconfirm")
+
+# matches the rewriter's update_addr_wrap_log(), but never changes a row
+# that someone else wrote
+UPSERT_SQL = """
+    INSERT INTO virtual (email, destination, transport, source)
+    VALUES (%s, %s, 'relay:', 'postconfirm')
+    ON CONFLICT (email) DO UPDATE SET updated = now()
+    WHERE virtual.source IN ('rewriter', 'postconfirm')
+"""
+
+
+def wrap_rows(senders):
+    """(wrap key, destination) for each usable sender, as the rewriter writes
+    them, plus the senders that were skipped."""
+    ours = {forwarding_domain.lower(), *rewrite_targets}
+    rows, skipped = {}, []
+    for sender in senders:
+        addr = (sender or "").strip()
+        local, at, domain = addr.rpartition("@")
+        if not (local and at and domain) or domain.lower() in ours or is_wrapped(addr):
+            # not an address, or already one of our wraps
+            skipped.append(sender)
+            continue
+        key = internal_addr(wrap_addr(addr, forwarding_domain))
+        rows[key] = internal_addr(addr)
+    return sorted(rows.items()), skipped
+
+
+def db_conninfo(dbname):
+    # the rewriter's DB_* settings, for either database; anything unset is
+    # left to libpq
+    params = {
+        "host": os.environ.get("DB_HOST"),
+        "port": os.environ.get("DB_PORT"),
+        "dbname": dbname,
+        "user": os.environ.get("DB_USER"),
+        "password": os.environ.get("DB_PASSWORD"),
+    }
+    return {k: v for k, v in params.items() if v}
+
+
+def postfix_conninfo():
+    return db_conninfo(os.environ.get("DB_NAME", "postfix"))
+
+
+def plan(rows, existing):
+    """What --apply would do to each (key, destination) row, given the
+    existing rows {email: (destination, source, current)}."""
+    planned = []
+    for key, destination in rows:
+        if key not in existing:
+            action, old_destination = "new", None
+        else:
+            old_destination, source, current = existing[key]
+            if source not in OUR_SOURCES:
+                action = f"untouched (source={source})"
+            else:
+                action = "refresh" if current else "revive"
+        if old_destination == destination:
+            old_destination = None
+        planned.append((action, key, destination, old_destination))
+    return planned
+
+
+def fetch_existing(keys):
+    keys = list(keys)
+    if not keys:
+        return {}
+    with psycopg.connect(**postfix_conninfo()) as conn:
+        conn.read_only = True
+        cur = conn.execute(EXISTING_SQL, (list(keys),))
+        return {email: (destination, source, current)
+                for email, destination, source, current in cur}
+
+
+def fetch_confirmed(dbname, sources):
+    with psycopg.connect(**db_conninfo(dbname)) as conn:
+        return [row[0] for row in conn.execute(CONFIRMED_SQL, (list(sources),))]
+
+
+def write_rows(rows):
+    # the connection commits when the block ends without an error
+    with psycopg.connect(**postfix_conninfo()) as conn, conn.cursor() as cur:
+        cur.executemany(UPSERT_SQL, rows)
+        return cur.rowcount
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--postconfirm-db", default="postconfirm", metavar="NAME",
+                   help="the postconfirm database, on the DB_HOST server (default: postconfirm)")
+    p.add_argument("--apply", action="store_true",
+                   help="write the rows to the virtual table; without it, only print "
+                        "the rows that would be written")
+    p.add_argument("-v", "--verbose", action="store_true", help="list skipped senders")
+    args = p.parse_args(argv)
+
+    senders = fetch_confirmed(args.postconfirm_db, OUR_SOURCES)
+    rows, skipped = wrap_rows(senders)
+    print(f"{len(senders)} confirmed senders, {len(rows)} wrap rows, {len(skipped)} skipped",
+          file=sys.stderr)
+    if args.verbose:
+        for sender in skipped:
+            print(f"skipped: {sender!r}", file=sys.stderr)
+
+    planned = plan(rows, fetch_existing(key for key, _ in rows))
+    counts = {}
+    for action, *_ in planned:
+        kind = action.split(" ")[0]
+        counts[kind] = counts.get(kind, 0) + 1
+    print(", ".join(f"{counts.get(k, 0)} {k}" for k in ("new", "refresh", "revive", "untouched")),
+          file=sys.stderr)
+
+    if not args.apply:
+        for action, key, destination, old_destination in planned:
+            line = f"{action}\t{key}\t{destination}"
+            if old_destination is not None:
+                line += f"\t(existing destination {old_destination} is kept)"
+            print(line)
+        print("dry run: nothing written (use --apply to write)", file=sys.stderr)
+        return 0
+
+    written = write_rows(rows)
+    print(f"{written} rows inserted or refreshed in virtual", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
