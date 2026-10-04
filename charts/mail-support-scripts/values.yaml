@@ -36,6 +36,14 @@ listsPostconfirmSync:
   secrets: []
   envFrom: []
 
+postconfimUnwrapSync:
+  enabled: true
+  schedule: "0 * * * *"
+  args: ["--apply"]
+  env: {}
+  secrets: []
+  envFrom: []
+
 serviceAccount:
   create: true
   name: ""
