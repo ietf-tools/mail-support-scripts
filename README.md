@@ -44,6 +44,7 @@ globalAllowlistSync:
     POSTCONFIRM_DB_HOST: db-rw
     POSTCONFIRM_DB_PORT: "5432"
     POSTCONFIRM_DB_NAME: postconfirm
+    TRUSTED_SENDERS_REDIS_URL: redis://rspamd-valkey:6379/0
   secrets:
     - name: DATATRACKER_TOKEN
       secretName: mail-support-scripts-env
@@ -88,7 +89,9 @@ dt-alias-sync --groups-file g.json --diff         # use local JSON instead of AP
 
 ### global-allowlist-sync
 
-Syncs known-good senders from Datatracker and Mailman to both the Mailman global allowlist and the postconfirm senders table.
+Syncs known-good senders from Datatracker and Mailman to both the Mailman global allowlist and the postconfirm senders table, and syncs postconfirm-confirmed senders to rspamd's `trusted_senders` Redis hash.
+
+Redis fields written by this script have the value `global-allowlist-sync`; only those fields are ever removed, so entries added by other means are left alone.
 
 ```bash
 global-allowlist-sync                    # dry-run, show what would change
@@ -97,6 +100,7 @@ global-allowlist-sync --apply --verbose  # apply with detailed output
 global-allowlist-sync --skip-mailman     # skip Mailman sync
 global-allowlist-sync --skip-postconfirm # skip Postconfirm sync
 global-allowlist-sync --skip-datatracker # use Mailman only
+global-allowlist-sync --skip-redis       # skip rspamd trusted_senders sync
 ```
 
 **Environment variables:**
@@ -109,3 +113,5 @@ global-allowlist-sync --skip-datatracker # use Mailman only
 - `MAILMAN_API_PASSWORD` - Mailman API password
 - `GLOBAL_ALLOWLIST_FQDN` - Mailman list for global allowlist
 - `POSTCONFIRM_DB_HOST`, `POSTCONFIRM_DB_PORT`, `POSTCONFIRM_DB_NAME`, `POSTCONFIRM_DB_USER`, `POSTCONFIRM_DB_PASS` - Postconfirm database connection
+- `TRUSTED_SENDERS_REDIS_URL` - rspamd Redis/Valkey URL (default: `redis://rspamd-valkey:6379/0`)
+- `TRUSTED_SENDERS_REDIS_KEY` - Redis hash rspamd reads trusted senders from (default: `trusted_senders`)

@@ -1,21 +1,23 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["httpx", "psycopg[binary]", "mailmanclient"]
+# dependencies = ["httpx", "psycopg[binary]", "mailmanclient", "redis"]
 # ///
 """
-Sync global allowlist to Mailman and Postconfirm.
+Sync global allowlist to Mailman, Postconfirm and rspamd.
 
 This script maintains the single source of truth for "known good senders":
 1. Fetches active emails from Datatracker API
 2. Fetches all Mailman subscribers + accept_these_nonmembers
 3. Syncs combined list to global-whitelist@ietf.org Mailman list
 4. Syncs to postconfirm's senders table
+5. Syncs postconfirm-confirmed senders to rspamd's trusted_senders Redis hash
 
 Usage:
     ./global-allowlist-sync                    # dry-run, show what would change
     ./global-allowlist-sync --apply            # apply changes
     ./global-allowlist-sync --apply --verbose  # apply with detailed output
+    ./global-allowlist-sync --skip-redis       # skip rspamd trusted_senders sync
 """
 
 import argparse
@@ -27,6 +29,7 @@ from typing import Optional
 import httpx
 import mailmanclient
 import psycopg
+import redis
 
 DATATRACKER_URL = os.environ.get("DATATRACKER_URL", "https://datatracker.ietf.org")
 DATATRACKER_TOKEN = os.environ.get("DATATRACKER_TOKEN")
@@ -44,6 +47,12 @@ POSTCONFIRM_DB_PORT = os.environ.get("POSTCONFIRM_DB_PORT", "5432")
 POSTCONFIRM_DB_NAME = os.environ.get("POSTCONFIRM_DB_NAME", "postconfirm")
 POSTCONFIRM_DB_USER = os.environ.get("POSTCONFIRM_DB_USER")
 POSTCONFIRM_DB_PASS = os.environ.get("POSTCONFIRM_DB_PASS")
+
+TRUSTED_SENDERS_REDIS_URL = os.environ.get("TRUSTED_SENDERS_REDIS_URL", "redis://rspamd-valkey:6379/0")
+TRUSTED_SENDERS_REDIS_KEY = os.environ.get("TRUSTED_SENDERS_REDIS_KEY", "trusted_senders")
+# value stored against each field we own; only fields with this value are ever removed
+TRUSTED_SENDERS_TAG = "global-allowlist-sync"
+REDIS_CHUNK_SIZE = 1000
 
 logger = logging.getLogger(__name__)
 
@@ -207,19 +216,20 @@ def fetch_confirmed_senders() -> set[str]:
     """
     Fetch addresses that have confirmed through postconfirm
     These are stored in the postconfirm database's senders table.
+
+    Errors are not caught: syncing without this set would remove every
+    confirmed sender from the allowlists.
     """
     logger.info("fetching confirmed addresses from postconfirm db...")
-    try:
-        with get_postconfirm_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT sender FROM senders WHERE action='accept' AND type='E'"
-                )
-                addresses = {row[0] for row in cur.fetchall()}
-        logger.debug("got %d confirmed addresses", len(addresses))
-        return addresses
-    except Exception as e:
-        logger.warning("could not fetch confirmed addresses: %s", e)
+    with get_postconfirm_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sender FROM senders WHERE action='accept' AND type='E'"
+            )
+            addresses = {row[0].lower() for row in cur.fetchall()}
+    logger.debug("got %d confirmed addresses", len(addresses))
+    return addresses
+
 
 def fetch_never_allow_addresses() -> set[str]:
     """
@@ -283,9 +293,55 @@ def sync_postconfirm_senders(addresses: set[str], apply: bool) -> tuple[int, int
         return len(to_add), len(to_remove), len(existing)
 
 
+def get_redis_client() -> redis.Redis:
+    return redis.Redis.from_url(TRUSTED_SENDERS_REDIS_URL, decode_responses=True)
+
+
+def sync_trusted_senders(
+    r: redis.Redis, addresses: set[str], apply: bool, key: str = TRUSTED_SENDERS_REDIS_KEY
+) -> tuple[int, int]:
+    """
+    Sync addresses into rspamd's trusted_senders hash (used by the
+    TRUSTED_ENVELOPE_FROM multimap rule). Fields we write carry
+    TRUSTED_SENDERS_TAG as their value; fields with any other value were
+    added by something else and are never overwritten or removed.
+    """
+    logger.info("syncing to redis %s...", key)
+    addresses = {addr.lower() for addr in addresses}
+
+    all_fields = set()
+    owned = set()
+    for field, value in r.hscan_iter(key, count=REDIS_CHUNK_SIZE):
+        all_fields.add(field)
+        if value == TRUSTED_SENDERS_TAG:
+            owned.add(field)
+
+    to_add = sorted(addresses - all_fields)
+    to_remove = sorted(owned - addresses)
+
+    logger.info("%s: %d to add, %d to remove", key, len(to_add), len(to_remove))
+
+    if not apply:
+        return len(to_add), len(to_remove)
+
+    pipe = r.pipeline(transaction=False)
+    for i in range(0, len(to_remove), REDIS_CHUNK_SIZE):
+        pipe.hdel(key, *to_remove[i : i + REDIS_CHUNK_SIZE])
+    for i in range(0, len(to_add), REDIS_CHUNK_SIZE):
+        pipe.hset(key, mapping={addr: TRUSTED_SENDERS_TAG for addr in to_add[i : i + REDIS_CHUNK_SIZE]})
+    pipe.execute()
+
+    for addr in to_remove:
+        logger.debug("removed %s from %s", addr, key)
+    for addr in to_add:
+        logger.debug("added %s to %s", addr, key)
+
+    return len(to_add), len(to_remove)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Sync global allowlist to Mailman and Postconfirm",
+        description="Sync global allowlist to Mailman, Postconfirm and rspamd",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -294,6 +350,7 @@ def main():
     parser.add_argument("--skip-mailman", action="store_true", help="Skip Mailman sync")
     parser.add_argument("--skip-postconfirm", action="store_true", help="Skip Postconfirm sync")
     parser.add_argument("--skip-datatracker", action="store_true", help="Skip Datatracker fetch (use Mailman only)")
+    parser.add_argument("--skip-redis", action="store_true", help="Skip rspamd trusted_senders Redis sync")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -306,7 +363,8 @@ def main():
 
     addresses = set()
 
-    addresses |=  fetch_confirmed_senders()
+    confirmed = fetch_confirmed_senders()
+    addresses |= confirmed
 
     if not args.skip_datatracker:
         addresses |= fetch_datatracker_emails()
@@ -319,6 +377,7 @@ def main():
 
     never_allow = fetch_never_allow_addresses()
     addresses -= never_allow
+    confirmed -= never_allow
 
     logger.info("total unique addresses: %d", len(addresses))
 
@@ -327,6 +386,12 @@ def main():
 
     if not args.skip_postconfirm:
         sync_postconfirm_senders(addresses, apply=args.apply)
+
+    if not args.skip_redis:
+        try:
+            sync_trusted_senders(get_redis_client(), confirmed, apply=args.apply)
+        except redis.RedisError as e:
+            logger.error("error syncing redis %s: %s", TRUSTED_SENDERS_REDIS_KEY, e)
 
     if args.apply:
         logger.info("sync complete")
