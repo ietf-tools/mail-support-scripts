@@ -28,8 +28,8 @@ DATATRACKER_TOKEN = os.environ.get("DATATRACKER_TOKEN")
 CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET")
 
-MAIL_HOST = os.environ.get("MAIL_HOST", "")
-DOMAIN_MAP = {"ietf": MAIL_HOST, "iab": MAIL_HOST, "irtf": MAIL_HOST}
+# datatracker returns domain labels; each one becomes its own alias address
+DOMAIN_MAP = {"ietf": "ietf.org", "iab": "iab.org", "irtf": "irtf.org", "rfc-editor": "rfc-editor.org"}
 
 TEST_OVERRIDE_ADDRESSES = os.environ.get("TEST_OVERRIDE_ADDRESSES", "").split(",") if os.environ.get("TEST_OVERRIDE_ADDRESSES") else []
 
@@ -82,12 +82,15 @@ def parse_aliases(data: dict, alias_type: str) -> list[dict]:
             continue
         
         for domain in entry.get("domains", []):
-            if mail_host := DOMAIN_MAP.get(domain):
-                result.append({
-                    "email": f"{alias_name}@{mail_host}",
-                    "destination": ", ".join(addresses),
-                    "alias_type": alias_type,
-                })
+            mail_domain = DOMAIN_MAP.get(domain)
+            if not mail_domain:
+                log(f"warning: skipping {alias_name}: unknown domain {domain!r}")
+                continue
+            result.append({
+                "email": f"{alias_name}@{mail_domain}",
+                "destination": ", ".join(addresses),
+                "alias_type": alias_type,
+            })
     return result
 
 

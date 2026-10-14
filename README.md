@@ -22,7 +22,6 @@ commonEnv:
 
 dtAliasSync:
   env:
-    MAIL_HOST: example.org
     DB_HOST: db-rw
     DB_PORT: "5432"
     DB_NAME: postfix
@@ -68,6 +67,9 @@ globalAllowlistSync:
 ### dt-alias-sync
 
 Syncs datatracker aliases (drafts and groups) to the postfix virtual table.
+Each alias is written once per domain datatracker lists for it (`ietf` → `ietf.org`,
+`irtf` → `irtf.org`, `iab` → `iab.org`, `rfc-editor` → `rfc-editor.org`); unknown domains are
+skipped with a warning.
 
 ```bash
 dt-alias-sync --diff                              # show what would change
@@ -83,7 +85,6 @@ dt-alias-sync --groups-file g.json --diff         # use local JSON instead of AP
 - `DATATRACKER_URL` - Datatracker API base URL (default: `https://datatracker.ietf.org`)
 - `DATATRACKER_TOKEN` - API token for authentication
 - `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` - Cloudflare Access service token (optional)
-- `MAIL_HOST` - Target mail host for aliases
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS` - Postfix database connection
 - `TEST_OVERRIDE_ADDRESSES` - Comma-separated addresses to substitute for all alias destinations (testing only)
 
