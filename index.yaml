@@ -3,6 +3,16 @@ entries:
   mail-support-scripts:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-10-14T18:16:00.307545396Z"
+    description: CronJobs for IETF mail infrastructure maintenance tasks
+    digest: 21976b03892e752ecb93946a8dfbef524eb22ebe91beed169cc3407ed066e240
+    name: mail-support-scripts
+    type: application
+    urls:
+    - https://github.com/ietf-tools/mail-support-scripts/releases/download/mail-support-scripts-3.1.2/mail-support-scripts-3.1.2.tgz
+    version: 3.1.2
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-10-08T21:37:08.550042766Z"
     description: CronJobs for IETF mail infrastructure maintenance tasks
     digest: d18df8bff12041853554aa6d600c195f7e804961f27a2070bd20099da93a6ebf
@@ -101,4 +111,4 @@ entries:
     urls:
     - https://github.com/ietf-tools/mail-support-scripts/releases/download/mail-support-scripts-1.0.0/mail-support-scripts-1.0.0.tgz
     version: 1.0.0
-generated: "2026-10-08T21:37:08.550088269Z"
+generated: "2026-10-14T18:16:00.307571545Z"
